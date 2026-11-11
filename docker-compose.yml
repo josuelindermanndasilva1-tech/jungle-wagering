@@ -6,9 +6,54 @@ services:
       POSTGRES_PASSWORD: wagering
       POSTGRES_DB: wagering
     ports:
-      - "5434:5432"
+      # 5434 no host porque 5432 e 5433 já estavam em uso na máquina de desenvolvimento
+      - '5434:5432'
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U wagering" ]
+      test: ['CMD-SHELL', 'pg_isready -U wagering']
       interval: 2s
       timeout: 3s
       retries: 20
+
+  localstack:
+    # 4.14.0 é a última versão que roda SQS sem token de licença; as versões 2026.x exigem LOCALSTACK_AUTH_TOKEN
+    image: localstack/localstack:4.14.0
+    environment:
+      SERVICES: sqs
+    ports:
+      - '4566:4566'
+    healthcheck:
+      test: ['CMD-SHELL', "curl -sf localhost:4566/_localstack/health | grep -q '\"sqs\": \"\\(available\\|running\\)\"'"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  # Aplicação em 3 réplicas: `docker compose --profile app up -d --build` (API nas portas 3001, 3002 e 3003).
+  migrate:
+    build: .
+    profiles: ['app']
+    command: ['bunx', '--bun', 'mikro-orm', 'migration:up', '--config', 'src/infrastructure/database/mikro-orm.config.ts']
+    environment:
+      DB_HOST: postgres
+      DB_PORT: '5432'
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  app:
+    build: .
+    profiles: ['app']
+    deploy:
+      replicas: 3
+    environment:
+      DB_HOST: postgres
+      DB_PORT: '5432'
+      SQS_ENDPOINT: http://localstack:4566
+    ports:
+      - '3001-3003:3000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
